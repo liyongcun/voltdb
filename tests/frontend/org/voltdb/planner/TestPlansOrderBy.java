@@ -176,8 +176,6 @@ public class TestPlansOrderBy extends PlannerTestCase {
                 false, true, false, false, true);
     }
 
-    //TODO: This test actually validates that we generate a sub-optimal plan for this query
-    //-- but we're keeping the test because, well, at least the query compiles to SOME kind of plan?
     public void testOrderByCountStar() {
         validatePlan("SELECT T_D0, COUNT(*) AS FOO FROM T GROUP BY T_D0 ORDER BY FOO", true, false, true, false, true);
         validatePlan("SELECT T_D0, COUNT(*) AS FOO FROM Tnokey GROUP BY T_D0 ORDER BY FOO", false, true, true, true);
