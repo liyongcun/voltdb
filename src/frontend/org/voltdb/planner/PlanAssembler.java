@@ -152,7 +152,7 @@ public class PlanAssembler {
     /**
      * Return true if tableList includes at least one matview.
      */
-    private boolean tableListIncludesView(List<Table> tableList) {
+    private static boolean tableListIncludesView(List<Table> tableList) {
         for (Table table : tableList) {
             if (table.getMaterializer() != null) {
                 return true;
@@ -293,7 +293,77 @@ public class PlanAssembler {
             // Update the best cost plan so far
             m_planSelector.considerCandidatePlan(rawplan, parsedStmt);
         }
-        return m_planSelector.m_bestPlan;
+
+        CompiledPlan bestPlan = m_planSelector.m_bestPlan;
+        if (bestPlan.readOnly == true) {
+            SendPlanNode sendNode = new SendPlanNode();
+            // connect the nodes to build the graph
+            sendNode.addAndLinkChild(bestPlan.rootPlanGraph);
+            // this plan is final, generate schema and resolve all the column index references
+            bestPlan.rootPlanGraph = sendNode;
+        }
+
+        // Execute the generateOutputSchema and resolveColumnIndexes Once from the top plan node for only best plan
+        bestPlan.rootPlanGraph.generateOutputSchema(m_catalogDb);
+        bestPlan.rootPlanGraph.resolveColumnIndexes();
+        if (parsedStmt instanceof ParsedSelectStmt) {
+            checkPlanColumnLeakage(bestPlan, (ParsedSelectStmt)parsedStmt);
+        }
+
+        // Output the best plan debug info
+        finalizeBestCostPlan();
+
+        // reset all the plan node ids for a given plan
+        // this makes the ids deterministic
+        bestPlan.resetPlanNodeIds();
+
+        // split up the plan everywhere we see send/recieve into multiple plan fragments
+        fragmentize(bestPlan);
+        return bestPlan;
+    }
+
+    private static void fragmentize(CompiledPlan plan) {
+        List<AbstractPlanNode> receives = plan.rootPlanGraph.findAllNodesOfType(PlanNodeType.RECEIVE);
+
+        if (receives.isEmpty()) return;
+
+        assert (receives.size() == 1);
+
+        ReceivePlanNode recvNode = (ReceivePlanNode) receives.get(0);
+        assert(recvNode.getChildCount() == 1);
+        AbstractPlanNode childNode = recvNode.getChild(0);
+        assert(childNode instanceof SendPlanNode);
+        SendPlanNode sendNode = (SendPlanNode) childNode;
+
+        // disconnect the send and receive nodes
+        sendNode.clearParents();
+        recvNode.clearChildren();
+
+        plan.subPlanGraph = sendNode;
+
+        return;
+    }
+
+    private static void checkPlanColumnLeakage(CompiledPlan plan, ParsedSelectStmt stmt) {
+        NodeSchema output_schema = plan.rootPlanGraph.getOutputSchema();
+        // Sanity-check the output NodeSchema columns against the display columns
+        if (stmt.displayColumns.size() != output_schema.size())
+        {
+            throw new PlanningErrorException("Mismatched plan output cols " +
+            "to parsed display columns");
+        }
+        for (ParsedColInfo display_col : stmt.displayColumns)
+        {
+            SchemaColumn col = output_schema.find(display_col.tableName,
+                                                  display_col.tableAlias,
+                                                  display_col.columnName,
+                                                  display_col.alias);
+            if (col == null)
+            {
+                throw new PlanningErrorException("Mismatched plan output cols " +
+                                                 "to parsed display columns");
+            }
+        }
     }
 
     /**
@@ -313,28 +383,20 @@ public class PlanAssembler {
      *         computable plans.
      */
     private CompiledPlan getNextPlan() {
-        CompiledPlan retval = new CompiledPlan();
+        CompiledPlan retval;
         AbstractParsedStmt nextStmt = null;
         if (m_parsedUnion != null) {
             nextStmt = m_parsedUnion;
             retval = getNextUnionPlan();
             if (retval != null) {
-                retval.readOnly = true;
             }
         } else if (m_parsedSelect != null) {
             nextStmt = m_parsedSelect;
-            retval.rootPlanGraph = getNextSelectPlan();
-            retval.readOnly = true;
-            if (retval.rootPlanGraph != null)
-            {
-                // Check PlanColumn resource leakage later by recording the select stmt.
-                retval.selectStmt = m_parsedSelect;
-                boolean orderIsDeterministic = m_parsedSelect.isOrderDeterministic();
-                boolean contentIsDeterministic = m_parsedSelect.isContentDeterministic();
-                retval.statementGuaranteesDeterminism(contentIsDeterministic, orderIsDeterministic);
-            }
+            retval = getNextSelectPlan();
         } else {
+            retval = new CompiledPlan();
             retval.readOnly = false;
+            retval.statementGuaranteesDeterminism(false, true); // Until we support DML w/ subqueries/limits
             if (m_parsedInsert != null) {
                 nextStmt = m_parsedInsert;
                 retval.rootPlanGraph = getNextInsertPlan();
@@ -353,16 +415,14 @@ public class PlanAssembler {
                         "setupForNewPlans not called or not successfull.");
             }
             assert (nextStmt.tableList.size() == 1);
-            if (nextStmt.tableList.get(0).getIsreplicated())
+            if (nextStmt.tableList.get(0).getIsreplicated()) {
                 retval.replicatedTableDML = true;
-            retval.statementGuaranteesDeterminism(true, true); // Until we support DML w/ subqueries/limits
+            }
         }
 
         if (retval == null || retval.rootPlanGraph == null) {
             return null;
         }
-
-        assert (nextStmt != null);
         retval.parameters = nextStmt.getParameters();
         return retval;
     }
@@ -473,8 +533,8 @@ public class PlanAssembler {
         retval.readOnly = true;
         retval.sql = m_planSelector.m_sql;
         boolean orderIsDeterministic = m_parsedUnion.isOrderDeterministic();
-        boolean contentIsDeterministic = m_parsedUnion.isContentDeterministic();
-        retval.statementGuaranteesDeterminism(contentIsDeterministic, orderIsDeterministic);
+        boolean hasLimitOrOffset = m_parsedUnion.hasLimitOrOffset();
+        retval.statementGuaranteesDeterminism(hasLimitOrOffset, orderIsDeterministic);
 
         // compute the cost - total of all children
         retval.cost = 0.0;
@@ -484,7 +544,7 @@ public class PlanAssembler {
         return retval;
     }
 
-    private AbstractPlanNode getNextSelectPlan() {
+    private CompiledPlan getNextSelectPlan() {
         assert (subAssembler != null);
 
         AbstractPlanNode subSelectRoot = subAssembler.nextPlan();
@@ -604,7 +664,13 @@ public class PlanAssembler {
             root = handleLimitOperator(root);
         }
 
-        return root;
+        CompiledPlan retval = new CompiledPlan();
+        retval.rootPlanGraph = root;
+        retval.readOnly = true;
+        boolean orderIsDeterministic = m_parsedSelect.isOrderDeterministic();
+        boolean hasLimitOrOffset = m_parsedSelect.hasLimitOrOffset();
+        retval.statementGuaranteesDeterminism(hasLimitOrOffset, orderIsDeterministic);
+        return retval;
     }
 
     private boolean needProjectionNode (AbstractPlanNode root) {
@@ -630,7 +696,7 @@ public class PlanAssembler {
     }
 
     // ENG-4909 Bug: currently disable NESTLOOPINDEX plan for IN
-    private boolean disableNestedLoopIndexJoinForInComparison (AbstractPlanNode root, AbstractParsedStmt parsedStmt) {
+    private static boolean disableNestedLoopIndexJoinForInComparison (AbstractPlanNode root, AbstractParsedStmt parsedStmt) {
         if (root.getPlanNodeType() == PlanNodeType.NESTLOOPINDEX) {
             assert(parsedStmt != null);
             return true;
@@ -919,7 +985,7 @@ public class PlanAssembler {
      * @param isReplicated Whether or not the target table is a replicated table.
      * @return
      */
-    AbstractPlanNode addSumOrLimitAndSendToDMLNode(AbstractPlanNode dmlRoot, boolean isReplicated)
+    static AbstractPlanNode addSumOrLimitAndSendToDMLNode(AbstractPlanNode dmlRoot, boolean isReplicated)
     {
         AbstractPlanNode sumOrLimitNode;
         SendPlanNode sendNode = new SendPlanNode();
@@ -1052,11 +1118,6 @@ public class PlanAssembler {
                                               : SortDirectionType.DESC);
         }
         orderByNode.addAndLinkChild(root);
-
-        if (m_parsedSelect.isOrderedByUniqueColumns()) {
-            orderByNode.setOrderingByUniqueColumns();
-        }
-
         return orderByNode;
     }
 
@@ -1820,7 +1881,7 @@ public class PlanAssembler {
      * @param expr The distinct expression
      * @return The new root node.
      */
-    AbstractPlanNode addDistinctNode(AbstractPlanNode root, AbstractExpression expr)
+    static AbstractPlanNode addDistinctNode(AbstractPlanNode root, AbstractExpression expr)
     {
         DistinctPlanNode distinctNode = new DistinctPlanNode();
         distinctNode.setDistinctExpression(expr);
@@ -1837,7 +1898,7 @@ public class PlanAssembler {
      * @return The set of column names affected by indexes with duplicates
      *         removed.
      */
-    public Set<String> getIndexedColumnSetForTable(Table table) {
+    public static Set<String> getIndexedColumnSetForTable(Table table) {
         HashSet<String> columns = new HashSet<String>();
 
         for (Index index : table.getIndexes()) {

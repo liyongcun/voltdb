@@ -42,13 +42,11 @@ public class OrderByPlanNode extends AbstractPlanNode {
         SORT_DIRECTION;
     }
 
-    private List<AbstractExpression> m_sortExpressions = new ArrayList<AbstractExpression>();
+    protected List<AbstractExpression> m_sortExpressions = new ArrayList<AbstractExpression>();
     /**
      * Sort Directions
      */
-    private List<SortDirectionType> m_sortDirections = new ArrayList<SortDirectionType>();
-
-    private boolean m_orderingByUniqueColumns = false;
+    protected List<SortDirectionType> m_sortDirections = new ArrayList<SortDirectionType>();
 
     public OrderByPlanNode() {
         super();
@@ -89,20 +87,8 @@ public class OrderByPlanNode extends AbstractPlanNode {
      */
     @Override
     public boolean isOrderDeterministic() {
-        AbstractPlanNode child = m_children.get(0);
-        if (child.isContentDeterministic()) {
-            if (m_orderingByUniqueColumns) {
-                return true;
-            }
-            m_nondeterminismDetail = "insufficient ordering criteria.";
-        } else {
-            m_nondeterminismDetail = m_children.get(0).nondeterminismDetail();
-        }
+        m_nondeterminismDetail = "insufficient ordering criteria.";
         return false;
-    }
-
-    public void setOrderingByUniqueColumns() {
-        m_orderingByUniqueColumns = true;
     }
 
     /**

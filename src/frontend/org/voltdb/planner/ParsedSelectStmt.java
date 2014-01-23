@@ -130,7 +130,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     private boolean hasComplexGroupby = false;
     private boolean hasAggregateExpression = false;
     private boolean hasAverage = false;
-    private boolean m_orderedByUniqueColumns = false;
+    private boolean m_orderedByUniquelyIndexedColumns = false;
     public MaterializedViewFixInfo mvFixInfo = new MaterializedViewFixInfo();
 
     /**
@@ -493,7 +493,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     }
 
     // Concat elements to the XXXColumns list
-    private void insertToColumnList (List<ParsedColInfo>columnList,
+    private static void insertToColumnList (List<ParsedColInfo>columnList,
             List<ParsedColInfo> newCols) {
         for (ParsedColInfo col: newCols) {
             if (!columnList.contains(col)) {
@@ -502,7 +502,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
         }
     }
 
-    private boolean isNewtoColumnList(List<ParsedColInfo>columnList, AbstractExpression expr) {
+    private static boolean isNewtoColumnList(List<ParsedColInfo>columnList, AbstractExpression expr) {
         boolean isNew = true;
         for (ParsedColInfo ic: columnList) {
             if (ic.expression.equals(expr)) {
@@ -896,6 +896,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
         return Collections.unmodifiableList(orderColumns);
     }
 
+    @Override
     public boolean hasLimitOrOffset() {
         if ((limit != -1) || (limitParameterId != -1) ||
             (offset > 0) || (offsetParameterId != -1)) {
@@ -962,15 +963,6 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     }
 
     @Override
-    public boolean isContentDeterministic()
-    {
-        if (hasLimitOrOffset()) {
-            return isOrderDeterministic();
-        }
-        return true;
-    }
-
-    @Override
     public boolean isOrderDeterministic()
     {
         if (guaranteesUniqueRow()) {
@@ -994,11 +986,12 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
      * @return whether there are GROUP BY columns and they are all order-determined by ORDER BY columns
      */
     private boolean orderByColumnsDetermineUniqueColumns(ArrayList<AbstractExpression> outNonOrdered) {
-        if ( ! isGrouped()) {
-            // TODO: Are there other ways to determine a unique set of columns without considering every display column?
-            return false;
+        if (isGrouped()) {
+            if (orderByColumnsDetermineAllColumns(groupByColumns, outNonOrdered)) {
+                return true;
+            }
         }
-        if (orderByColumnsDetermineAllColumns(groupByColumns, outNonOrdered)) {
+        else if (m_orderedByUniquelyIndexedColumns) {
             return true;
         }
         return false;
@@ -1183,6 +1176,10 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
      * @return
      */
     public void inferOrderingByUniqueColumns() {
+        // order determinism is analyzed differently for grouped queries.
+        if (isGrouped()) {
+            return;
+        }
         // In theory, for every table in the query, there needs to exist a uniqueness constraint
         // (primary key or other unique index) on some of the ORDER BY values regardless of whether
         // the associated index is used in the selected plan.
@@ -1232,10 +1229,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
             List<AbstractExpression> orderedAliasExprs = orderedAlias.getValue();
             Integer tableIndex = tableAliasIndexMap.get(orderedAlias.getKey());
             if (tableIndex == null) {
-                // This case arises from ordering by aggs which are associated with a temp table.
-                // rather their original base table.
-                // This case is not recognized as ordered by unique columns, but maybe
-                // it should be.
+                assert(false);
                 return;
             }
             StmtTableScan tableScan = stmtCache.get(tableIndex);
@@ -1296,11 +1290,6 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
                 break;
             }
         }
-        m_orderedByUniqueColumns = allScansAreDeterministic;
-    }
-
-    boolean isOrderedByUniqueColumns()
-    {
-        return m_orderedByUniqueColumns;
+        m_orderedByUniquelyIndexedColumns = allScansAreDeterministic;
     }
 }
