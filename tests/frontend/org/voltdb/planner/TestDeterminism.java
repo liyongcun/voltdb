@@ -52,9 +52,8 @@ public class TestDeterminism extends PlannerTestCase {
     private void assertPlanDeterminism(String sql, boolean order, boolean content, DeterminismMode detMode)
     {
         CompiledPlan cp = compileAdHocPlan(sql, detMode);
-        assertTrue(order == cp.isOrderDeterministic());
-        assertTrue(content == cp.isContentDeterministic());
-        assertTrue(cp.isContentDeterministic() || ! cp.isOrderDeterministic());
+        assertEquals(order, cp.isOrderDeterministic());
+        assertEquals(content, cp.isOrderDeterministic() || ! cp.hasLimitOrOffset());
         assertTrue(cp.isOrderDeterministic() || (null != cp.nondeterminismDetail()));
     }
 

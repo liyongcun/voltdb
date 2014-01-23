@@ -119,12 +119,12 @@ public class ParsedUnionStmt extends AbstractParsedStmt {
         return true;
     }
 
-    public boolean isContentDeterministic() {
+    public boolean hasLimitOrOffset() {
         for (AbstractParsedStmt childStmt : m_children) {
-            if ( ! childStmt.isContentDeterministic()) {
-                return false;
+            if ( childStmt.hasLimitOrOffset()) {
+                return true;
             }
         }
-        return true;
+        return false;
     }
 }
