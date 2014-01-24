@@ -293,77 +293,7 @@ public class PlanAssembler {
             // Update the best cost plan so far
             m_planSelector.considerCandidatePlan(rawplan, parsedStmt);
         }
-
-        CompiledPlan bestPlan = m_planSelector.m_bestPlan;
-        if (bestPlan.readOnly == true) {
-            SendPlanNode sendNode = new SendPlanNode();
-            // connect the nodes to build the graph
-            sendNode.addAndLinkChild(bestPlan.rootPlanGraph);
-            // this plan is final, generate schema and resolve all the column index references
-            bestPlan.rootPlanGraph = sendNode;
-        }
-
-        // Execute the generateOutputSchema and resolveColumnIndexes Once from the top plan node for only best plan
-        bestPlan.rootPlanGraph.generateOutputSchema(m_catalogDb);
-        bestPlan.rootPlanGraph.resolveColumnIndexes();
-        if (parsedStmt instanceof ParsedSelectStmt) {
-            checkPlanColumnLeakage(bestPlan, (ParsedSelectStmt)parsedStmt);
-        }
-
-        // Output the best plan debug info
-        finalizeBestCostPlan();
-
-        // reset all the plan node ids for a given plan
-        // this makes the ids deterministic
-        bestPlan.resetPlanNodeIds();
-
-        // split up the plan everywhere we see send/recieve into multiple plan fragments
-        fragmentize(bestPlan);
-        return bestPlan;
-    }
-
-    private static void fragmentize(CompiledPlan plan) {
-        List<AbstractPlanNode> receives = plan.rootPlanGraph.findAllNodesOfType(PlanNodeType.RECEIVE);
-
-        if (receives.isEmpty()) return;
-
-        assert (receives.size() == 1);
-
-        ReceivePlanNode recvNode = (ReceivePlanNode) receives.get(0);
-        assert(recvNode.getChildCount() == 1);
-        AbstractPlanNode childNode = recvNode.getChild(0);
-        assert(childNode instanceof SendPlanNode);
-        SendPlanNode sendNode = (SendPlanNode) childNode;
-
-        // disconnect the send and receive nodes
-        sendNode.clearParents();
-        recvNode.clearChildren();
-
-        plan.subPlanGraph = sendNode;
-
-        return;
-    }
-
-    private static void checkPlanColumnLeakage(CompiledPlan plan, ParsedSelectStmt stmt) {
-        NodeSchema output_schema = plan.rootPlanGraph.getOutputSchema();
-        // Sanity-check the output NodeSchema columns against the display columns
-        if (stmt.displayColumns.size() != output_schema.size())
-        {
-            throw new PlanningErrorException("Mismatched plan output cols " +
-            "to parsed display columns");
-        }
-        for (ParsedColInfo display_col : stmt.displayColumns)
-        {
-            SchemaColumn col = output_schema.find(display_col.tableName,
-                                                  display_col.tableAlias,
-                                                  display_col.columnName,
-                                                  display_col.alias);
-            if (col == null)
-            {
-                throw new PlanningErrorException("Mismatched plan output cols " +
-                                                 "to parsed display columns");
-            }
-        }
+        return m_planSelector.m_bestPlan;
     }
 
     /**
@@ -388,8 +318,6 @@ public class PlanAssembler {
         if (m_parsedUnion != null) {
             nextStmt = m_parsedUnion;
             retval = getNextUnionPlan();
-            if (retval != null) {
-            }
         } else if (m_parsedSelect != null) {
             nextStmt = m_parsedSelect;
             retval = getNextSelectPlan();
@@ -608,7 +536,7 @@ public class PlanAssembler {
                         "This special case join between an outer replicated table and " +
                         "an inner partitioned table is too complex and is not supported.");
             } else {
-                root = subAssembler.addSendReceivePair(root);
+                root = SubPlanAssembler.addSendReceivePair(root);
                 // Root is a receive node here.
                 assert(root instanceof ReceivePlanNode);
 
@@ -769,7 +697,7 @@ public class PlanAssembler {
         }
 
         // Send the local result counts to the coordinator.
-        AbstractPlanNode recvNode = subAssembler.addSendReceivePair(deleteNode);
+        AbstractPlanNode recvNode = SubPlanAssembler.addSendReceivePair(deleteNode);
         // add a sum or a limit and send on top of the union
         return addSumOrLimitAndSendToDMLNode(recvNode, targetTable.getIsreplicated());
     }
@@ -846,7 +774,7 @@ public class PlanAssembler {
         }
 
         // Send the local result counts to the coordinator.
-        AbstractPlanNode recvNode = subAssembler.addSendReceivePair(updateNode);
+        AbstractPlanNode recvNode = SubPlanAssembler.addSendReceivePair(updateNode);
         // add a sum or a limit and send on top of the union
         return addSumOrLimitAndSendToDMLNode(recvNode, targetTable.getIsreplicated());
     }
@@ -969,12 +897,7 @@ public class PlanAssembler {
         }
 
         insertNode.setMultiPartition(true);
-        // The following is the moral equivalent of addSendReceivePair
-        SendPlanNode sendNode = new SendPlanNode();
-        sendNode.addAndLinkChild(insertNode);
-        AbstractPlanNode recvNode = new ReceivePlanNode();
-        recvNode.addAndLinkChild(sendNode);
-
+        AbstractPlanNode recvNode = SubPlanAssembler.addSendReceivePair(insertNode);
         // add a count or a limit and send on top of the union
         return addSumOrLimitAndSendToDMLNode(recvNode, targetTable.getIsreplicated());
     }
@@ -990,8 +913,6 @@ public class PlanAssembler {
     static AbstractPlanNode addSumOrLimitAndSendToDMLNode(AbstractPlanNode dmlRoot, boolean isReplicated)
     {
         AbstractPlanNode sumOrLimitNode;
-        SendPlanNode sendNode = new SendPlanNode();
-
         if (isReplicated) {
             // Replicated table DML result doesn't need to be summed. All partitions should
             // modify the same number of tuples in replicated table, so just pick the result from
@@ -1035,6 +956,7 @@ public class PlanAssembler {
 
         // connect the nodes to build the graph
         sumOrLimitNode.addAndLinkChild(dmlRoot);
+        SendPlanNode sendNode = new SendPlanNode();
         sendNode.addAndLinkChild(sumOrLimitNode);
 
         return sendNode;
