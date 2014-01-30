@@ -106,6 +106,8 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     public ArrayList<ParsedColInfo> orderColumns = new ArrayList<ParsedColInfo>();
     public AbstractExpression having = null;
     public ArrayList<ParsedColInfo> groupByColumns = new ArrayList<ParsedColInfo>();
+    private boolean groupAndOrderByPermutationWasTested = false;
+    private boolean groupAndOrderByPermutationResult = false;
 
     // It will store the final projection node schema for this plan if it is needed.
     // Calculate once, and use it everywhere else.
@@ -130,7 +132,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     private boolean hasComplexGroupby = false;
     private boolean hasAggregateExpression = false;
     private boolean hasAverage = false;
-    private boolean m_orderedByUniquelyIndexedColumns = false;
+
     public MaterializedViewFixInfo mvFixInfo = new MaterializedViewFixInfo();
 
     /**
@@ -181,7 +183,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
             insertToColumnList(aggResultColumns, groupByColumns);
         }
 
-        if (orderbyElement != null && !guaranteesUniqueRow()) {
+        if (orderbyElement != null && ! hasAOneRowResult()) {
             parseOrderColumns(orderbyElement, false);
         }
 
@@ -206,7 +208,6 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
         }
 
         prepareMVBasedQueryFix();
-        inferOrderingByUniqueColumns();
     }
 
     private void processAvgPushdownOptimization (VoltXMLElement displayElement,
@@ -965,39 +966,148 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     @Override
     public boolean isOrderDeterministic()
     {
-        if (guaranteesUniqueRow()) {
+        if (hasAOneRowResult()) {
             return true;
         }
-        ArrayList<AbstractExpression> nonOrdered = new ArrayList<AbstractExpression>();
-        if (orderByColumnsDetermineUniqueColumns(nonOrdered)) {
-            return true;
+        if ( ! hasOrderByColumns() ) {
+            return false;
         }
-        if (orderByColumnsDetermineAllDisplayColumns(nonOrdered)) {
-            return true;
-        }
-        return false;
-    }
 
-    /**
-     * Does the ordering of a statements's GROUP BY columns ensure determinism.
-     * All display columns are functionally dependent on the GROUP BY columns
-     * even if the display column's values are not ordered or unique, so ordering by GROUP BY columns is enough to get determinism.
-     * @param outNonOrdered - list of non-matching GROUP BY columns, populated as a side effect
-     * @return whether there are GROUP BY columns and they are all order-determined by ORDER BY columns
-     */
-    private boolean orderByColumnsDetermineUniqueColumns(ArrayList<AbstractExpression> outNonOrdered) {
+        // The nonOrdered expression list is used as a short-cut -- if an expression has been
+        // determined to be non-ordered when encountered as a GROUP BY expression,
+        // it will also be non-ordered when encountered in the select list.
+        ArrayList<AbstractExpression> nonOrdered = new ArrayList<AbstractExpression>();
+
         if (isGrouped()) {
-            if (orderByColumnsDetermineAllColumns(groupByColumns, outNonOrdered)) {
+            // Does the ordering of a statements's GROUP BY columns ensure determinism?
+            // All display columns and order-by expressions are functionally dependent on the GROUP BY
+            // columns even if the display column's values are not ordered or unique,
+            // so ordering by ALL of the GROUP BY columns is enough to get full determinism,
+            // EVEN if ordering by other (dependent) expressions,
+            // regardless of the placement of non-GROUP BY expressions in the ORDER BY list.
+            if (orderByColumnsDetermineAllColumns(groupByColumns, nonOrdered)) {
+                return true;
+            }
+            if (orderByColumnsDetermineAllDisplayColumns(nonOrdered)) {
+                return true;
+            }
+        } else {
+            if (orderByColumnsDetermineAllDisplayColumns(nonOrdered)) {
+                return true;
+            }
+            if (orderByColumnsCoverUniqueKeys()) {
                 return true;
             }
         }
-        else if (m_orderedByUniquelyIndexedColumns) {
-            return true;
-        }
         return false;
     }
 
-    private boolean orderByColumnsDetermineAllDisplayColumns(ArrayList<AbstractExpression> nonOrdered) {
+    private boolean orderByColumnsCoverUniqueKeys()
+    {
+        // In theory, if EVERY table in the query has a uniqueness constraint
+        // (primary key or other unique index) on columns that are all listed in the ORDER BY values,
+        // the result is deterministic.
+        // This holds regardless of whether the associated index is actually used in the selected plan,
+        // so this check is plan-independent.
+        HashMap<String, List<AbstractExpression> > baseTableAliases =
+                new HashMap<String, List<AbstractExpression> >();
+        for (ParsedColInfo col : orderColumns) {
+            AbstractExpression expr = col.expression;
+            List<AbstractExpression> baseTVEs = expr.findBaseTVEs();
+            if (baseTVEs.size() != 1) {
+                // Table-spanning ORDER BYs -- like ORDER BY A.X + B.Y are not helpful.
+                // Neither are (nonsense) constant (table-less) expressions.
+                continue;
+            }
+            // This loops exactly once.
+            AbstractExpression baseTVE = baseTVEs.get(0);
+            String nextTableAlias = ((TupleValueExpression)baseTVE).getTableAlias();
+            assert(nextTableAlias != null);
+            List<AbstractExpression> perTable = baseTableAliases.get(nextTableAlias);
+            if (perTable == null) {
+                perTable = new ArrayList<AbstractExpression>();
+                baseTableAliases.put(nextTableAlias, perTable);
+            }
+            perTable.add(expr);
+        }
+
+        if (tableAliasIndexMap.size() > baseTableAliases.size()) {
+            // FIXME: This would be one of the tricky cases where the goal would be to prove that the
+            // row with no ORDER BY component came from the right side of a 1-to-1 or many-to-1 join.
+            return false;
+        }
+        boolean allScansAreDeterministic = true;
+        for (Entry<String, List<AbstractExpression>> orderedAlias : baseTableAliases.entrySet()) {
+            List<AbstractExpression> orderedAliasExprs = orderedAlias.getValue();
+            Integer tableId = tableAliasIndexMap.get(orderedAlias.getKey());
+            if (tableId == null) {
+                assert(false);
+                return false;
+            }
+            StmtTableScan tableScan = stmtCache.get(tableId);
+            if (tableScan == null) {
+                assert(false);
+                return false;
+            }
+            Table table = tableScan.m_table;
+            if (table == null) {
+                return false; // don't yet handle FROM clause subquery, here.
+            }
+            // This table's scans need to be proven deterministic.
+            allScansAreDeterministic = false;
+            // Search indexes for one that makes the order by deterministic
+            for (Index index : table.getIndexes()) {
+                // skip non-unique indexes
+                if ( ! index.getUnique()) {
+                    continue;
+                }
+
+                // get the list of expressions for the index
+                List<AbstractExpression> indexExpressions = new ArrayList<AbstractExpression>();
+
+                String jsonExpr = index.getExpressionsjson();
+                // if this is a pure-column index...
+                if (jsonExpr.isEmpty()) {
+                    for (ColumnRef cref : index.getColumns()) {
+                        Column col = cref.getColumn();
+                        TupleValueExpression tve = new TupleValueExpression(table.getTypeName(),
+                                                                            orderedAlias.getKey(),
+                                                                            col.getName(),
+                                                                            col.getName(),
+                                                                            col.getIndex());
+                        indexExpressions.add(tve);
+                    }
+                }
+                // if this is a fancy expression-based index...
+                else {
+                    try {
+                        indexExpressions = AbstractExpression.fromJSONArrayString(jsonExpr, tableScan);
+                    } catch (JSONException e) {
+                        e.printStackTrace();
+                        assert(false);
+                        continue;
+                    }
+                }
+
+                // If the sort covers the index, then it's a unique sort.
+                //TODO: The statement's equivalence sets would be handy here to recognize cases like
+                //    WHERE B.unique_id = A.b_id
+                //    ORDER BY A.unique_id, A.b_id
+                if (orderedAliasExprs.containsAll(indexExpressions)) {
+                    allScansAreDeterministic = true;
+                    break;
+                }
+            }
+            // ALL tables' scans need to have proved deterministic
+            if ( ! allScansAreDeterministic) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private boolean orderByColumnsDetermineAllDisplayColumns(ArrayList<AbstractExpression> nonOrdered)
+    {
         ArrayList<ParsedColInfo> candidateColumns = new ArrayList<ParsedSelectStmt.ParsedColInfo>();
         for (ParsedColInfo displayCol : displayColumns) {
             if (displayCol.orderBy) {
@@ -1005,8 +1115,8 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
             }
             if (displayCol.groupBy) {
                 AbstractExpression displayExpr = displayCol.expression;
-                // Round up the usual suspects -- if there were uncooperative GROUP BY expressions, they will
-                // often also be display column expressions.
+                // Round up the usual suspects -- if there were uncooperative GROUP BY expressions,
+                // they will often also be uncooperative display column expressions.
                 for (AbstractExpression nonStarter : nonOrdered) {
                      if (displayExpr.equals(nonStarter)) {
                          return false;
@@ -1019,7 +1129,6 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
         }
         return orderByColumnsDetermineAllColumns(candidateColumns, null);
     }
-
 
     private boolean orderByColumnsDetermineAllColumns(ArrayList<ParsedColInfo> candidateColumns,
                                                       ArrayList<AbstractExpression> outNonOrdered) {
@@ -1109,7 +1218,8 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
         return result;
     }
 
-    boolean guaranteesUniqueRow() {
+    private boolean hasAOneRowResult()
+    {
         if ( ( ! isGrouped() ) && displaysAgg()) {
             return true;
         }
@@ -1146,6 +1256,11 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     }
 
     boolean groupByIsAnOrderByPermutation() {
+		if (groupAndOrderByPermutationWasTested) {
+            return groupAndOrderByPermutationResult;
+        }
+        groupAndOrderByPermutationWasTested = true;
+
         int size = groupByColumns.size();
         if (size != orderColumns.size()) {
             return false;
@@ -1167,129 +1282,43 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
             groupExprs.add(gexpr);
             orderPrefixExprs.add(oexpr);
         }
-        return groupExprs.equals(orderPrefixExprs);
+        groupAndOrderByPermutationResult = groupExprs.equals(orderPrefixExprs);
+        return groupAndOrderByPermutationResult;
     }
 
-    /**
-     * @param m_parsedSelect
-     * @param orderExpressions
-     * @return
-     */
-    public void inferOrderingByUniqueColumns() {
-        // order determinism is analyzed differently for grouped queries.
-        if (isGrouped()) {
-            return;
+    void checkPlanColumnMatch(List<SchemaColumn> columns) {
+        // Sanity-check the output NodeSchema columns against the display columns
+        if (displayColumns.size() != columns.size()) {
+            throw new PlanningErrorException(
+                    "Mismatched plan output cols to parsed display columns");
         }
-        // In theory, for every table in the query, there needs to exist a uniqueness constraint
-        // (primary key or other unique index) on some of the ORDER BY values regardless of whether
-        // the associated index is used in the selected plan.
-        // If the index scan was used at the top of the plan, and its sort order was valid
-        // -- meaning covering the entire ORDER BY clause --
-        // this function would have already returned without adding an orderByNode.
-        // The interesting cases, including issue ENG-3335, are
-        // -- when the index scan is in the distributed part of the plan
-        //    Then, the orderByNode is required to re-order the results at the coordinator.
-        // -- when the index was not the one selected for the plan.
-        // -- when the index is defined on a left-most child of a join the distributed part of the plan
-        //    Then, the orderByNode is required to re-order the results at the coordinator.
+        int ii = 0;
+        for (ParsedColInfo display_col : displayColumns) {
+            SchemaColumn sc = columns.get(ii);
+            ++ii;
+            boolean sameTable = false;
 
-        // Start by eliminating joins since, in general, a join (one-to-many) may produce multiple
-        // joined rows for each unique input row.
-        // TODO: In theory, it is possible to analyze the join criteria and/or projected columns
-        // to determine whether the particular join preserves the uniqueness of its index-scanned input.
-
-        HashMap<String, List<AbstractExpression> > baseTableAliases =
-                new HashMap<String, List<AbstractExpression> >();
-        for (ParsedSelectStmt.ParsedColInfo col : orderColumns) {
-            AbstractExpression expr = col.expression;
-            List<AbstractExpression> baseTVEs = expr.findBaseTVEs();
-            if (baseTVEs.size() > 1) {
-                // For now, cross-table ORDER BYs -- like ORDER BY A.X + B.Y are not recognized.
-                // FIXME: I THINK that this is just for ease of implementation.
-                return;
-            }
-            // loops once, for now.
-            for (AbstractExpression baseTVE : baseTVEs) {
-                String nextTableAlias = ((TupleValueExpression)baseTVE).getTableAlias();
-                assert(nextTableAlias != null);
-                if ( ! baseTableAliases.containsKey(nextTableAlias)) {
-                    baseTableAliases.put(nextTableAlias, new ArrayList<AbstractExpression>());
+            if (display_col.tableAlias != null) {
+                if (display_col.tableAlias.equals(sc.getTableAlias())) {
+                    sameTable = true;
                 }
-                baseTableAliases.get(nextTableAlias).add(expr);
+            } else if (display_col.tableName.equals(sc.getTableName())) {
+                sameTable = true;
             }
-        }
-
-        if (tableAliasIndexMap.size() > baseTableAliases.size()) {
-            // FIXME: This would be one of the tricky cases where the goal would be to prove that the
-            // row with no ORDER BY component came from the right side of a 1-to-1 or many-to-1 join.
-            return;
-        }
-        boolean allScansAreDeterministic = true;
-        for (Entry<String, List<AbstractExpression>> orderedAlias : baseTableAliases.entrySet()) {
-            List<AbstractExpression> orderedAliasExprs = orderedAlias.getValue();
-            Integer tableIndex = tableAliasIndexMap.get(orderedAlias.getKey());
-            if (tableIndex == null) {
-                assert(false);
-                return;
-            }
-            StmtTableScan tableScan = stmtCache.get(tableIndex);
-            if (tableScan == null) {
-                assert(false);
-                return;
-            }
-            Table table = tableScan.m_table;
-            if (table == null) {
-                return;
-            }
-            allScansAreDeterministic = false;
-            // search indexes for one that makes the order by deterministic
-            for (Index index : table.getIndexes()) {
-                // skip non-unique indexes
-                if ( ! index.getUnique()) {
-                    continue;
-                }
-
-                // get the list of expressions for the index
-                List<AbstractExpression> indexExpressions = new ArrayList<AbstractExpression>();
-
-                String jsonExpr = index.getExpressionsjson();
-                // if this is a pure-column index...
-                if (jsonExpr.isEmpty()) {
-                    for (ColumnRef cref : index.getColumns()) {
-                        Column col = cref.getColumn();
-                        TupleValueExpression tve = new TupleValueExpression(table.getTypeName(),
-                                                                            orderedAlias.getKey(),
-                                                                            col.getName(),
-                                                                            col.getName(),
-                                                                            col.getIndex());
-                        tve.setValueSize(col.getSize());
-                        tve.setValueType(VoltType.get((byte) col.getType()));
-                        indexExpressions.add(tve);
-                    }
-                }
-                // if this is a fancy expression-based index...
-                else {
-                    try {
-                        indexExpressions = AbstractExpression.fromJSONArrayString(jsonExpr, tableScan);
-                    } catch (JSONException e) {
-                        e.printStackTrace(); // danger will robinson
-                        assert(false);
+            if (sameTable) {
+                if (display_col.alias != null && ! display_col.alias.equals("")) {
+                    if (display_col.alias.equals(sc.getColumnAlias())) {
                         continue;
                     }
                 }
-
-                // If the sort covers the index, then it's a unique sort.
-                //TODO: The statement's equivalence sets would be handy here to recognize cases like
-                //    WHERE A.unique_id = 1 AND A.b_id = 2 and B.unique_id = A.b_id ORDER BY B.unique_id
-                if (orderedAliasExprs.containsAll(indexExpressions)) {
-                    allScansAreDeterministic = true;
-                    break;
+                else if (display_col.columnName != null && ! display_col.columnName.equals("")) {
+                    if (display_col.columnName.equals(sc.getColumnName())) {
+                        continue;
+                    }
                 }
             }
-            if ( ! allScansAreDeterministic) {
-                break;
-            }
+            throw new PlanningErrorException(
+                    "Mismatched plan output cols to parsed display columns");
         }
-        m_orderedByUniquelyIndexedColumns = allScansAreDeterministic;
     }
 }

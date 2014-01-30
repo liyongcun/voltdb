@@ -74,8 +74,6 @@ public class CompiledPlan {
     /** Parameter values, if the planner pulled constants out of the plan */
     public ParameterSet extractedParamValues = ParameterSet.emptyParameterSet();
 
-    public ParsedSelectStmt  selectStmt = null;
-
     /**
      * If true, divide the number of tuples changed
      * by the number of partitions, as the number will
@@ -142,6 +140,15 @@ public class CompiledPlan {
             return true;
         }
         return rootPlanGraph.isOrderDeterministic();
+    }
+
+    /**
+     * Accessor for flag marking the original statement as guaranteeing an identical result/effect
+     * when "replayed" against the same database state, such as during replication or CL recovery.
+     */
+    public boolean hasDeterministicStatement()
+    {
+        return m_statementIsOrderDeterministic;
     }
 
     /**

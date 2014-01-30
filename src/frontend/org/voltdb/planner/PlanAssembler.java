@@ -324,7 +324,6 @@ public class PlanAssembler {
         } else {
             retval = new CompiledPlan();
             retval.readOnly = false;
-            retval.statementGuaranteesDeterminism(false, true); // Until we support DML w/ subqueries/limits
             if (m_parsedInsert != null) {
                 nextStmt = m_parsedInsert;
                 retval.rootPlanGraph = getNextInsertPlan();
@@ -346,11 +345,14 @@ public class PlanAssembler {
             if (nextStmt.tableList.get(0).getIsreplicated()) {
                 retval.replicatedTableDML = true;
             }
+            retval.statementGuaranteesDeterminism(false, true); // Until we support DML w/ subqueries/limits
         }
 
         if (retval == null || retval.rootPlanGraph == null) {
             return null;
         }
+
+        assert (nextStmt != null);
         retval.parameters = nextStmt.getParameters();
         return retval;
     }
@@ -1003,11 +1005,6 @@ public class PlanAssembler {
 
         // Only sort when the statement has an ORDER BY.
         if ( ! m_parsedSelect.hasOrderByColumns()) {
-            return root;
-        }
-
-        // Ignore ORDER BY in cases where there can be at most one row.
-        if (m_parsedSelect.guaranteesUniqueRow()) {
             return root;
         }
 

@@ -81,17 +81,6 @@ public class OrderByPlanNode extends AbstractPlanNode {
     }
 
     /**
-     * Accessor for flag marking the plan as guaranteeing an identical result/effect
-     * when "replayed" against the same database state, such as during replication or CL recovery.
-     * @return child's value
-     */
-    @Override
-    public boolean isOrderDeterministic() {
-        m_nondeterminismDetail = "insufficient ordering criteria.";
-        return false;
-    }
-
-    /**
      * Add a sort to the order-by
      * @param sortExpr  The input expression on which to order the rows
      * @param sortDir

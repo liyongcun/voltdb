@@ -92,15 +92,8 @@ public class TestPlansGroupBy extends PlannerTestCase {
         }
     }
 
-    private void checkGroupByOnlyPlan(List<AbstractPlanNode> pns, boolean twoFragments, boolean isHashAggregator, boolean isIndexScan) {
-        for (AbstractPlanNode apn: pns) {
-            System.out.println(apn.toExplainPlanString());
-            while (apn.getChildCount() > 0) {
-                apn = apn.getChild(0);
-                System.out.println(apn.toExplainPlanString());
-            }
-        }
-
+    private void checkGroupByOnlyPlan(List<AbstractPlanNode> pns, boolean twoFragments,
+                                      boolean isHashAggregator, boolean isIndexScan) {
         AbstractPlanNode apn = pns.get(0).getChild(0);
         if (twoFragments) {
             assertTrue(apn.getPlanNodeType() == PlanNodeType.HASHAGGREGATE);
@@ -182,6 +175,7 @@ public class TestPlansGroupBy extends PlannerTestCase {
         // SeqScanToIndexScan optimization for deterministic reason
         // use EXPR_F_TREE1 not EXPR_F_TREE2
         pns = compileToFragments("SELECT F_D2 - F_D3, COUNT(*) FROM F GROUP BY F_D2 - F_D3");
+        /*/ debug */ System.out.println(pns.get(0).toExplainPlanString());
         checkGroupByOnlyPlan(pns, true, true, true);
     }
 

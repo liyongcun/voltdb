@@ -278,6 +278,7 @@ public class QueryPlanner {
             }
             return null;
         }
+
         if (bestPlan.readOnly) {
             SendPlanNode sendNode = new SendPlanNode();
             // connect the nodes to build the graph
@@ -290,7 +291,8 @@ public class QueryPlanner {
         bestPlan.rootPlanGraph.generateOutputSchema(m_db);
         bestPlan.rootPlanGraph.resolveColumnIndexes();
         if (parsedStmt instanceof ParsedSelectStmt) {
-            checkPlanColumnLeakage(bestPlan, (ParsedSelectStmt)parsedStmt);
+            List<SchemaColumn> columns = bestPlan.rootPlanGraph.getOutputSchema().getColumns();
+            ((ParsedSelectStmt)parsedStmt).checkPlanColumnMatch(columns);
         }
 
         // Output the best plan debug info
@@ -326,27 +328,4 @@ public class QueryPlanner {
 
         return;
     }
-
-    private static void checkPlanColumnLeakage(CompiledPlan plan, ParsedSelectStmt stmt) {
-        NodeSchema output_schema = plan.rootPlanGraph.getOutputSchema();
-        // Sanity-check the output NodeSchema columns against the display columns
-        if (stmt.displayColumns.size() != output_schema.size())
-        {
-            throw new PlanningErrorException("Mismatched plan output cols " +
-            "to parsed display columns");
-        }
-        for (ParsedColInfo display_col : stmt.displayColumns)
-        {
-            SchemaColumn col = output_schema.find(display_col.tableName,
-                                                  display_col.tableAlias,
-                                                  display_col.columnName,
-                                                  display_col.alias);
-            if (col == null)
-            {
-                throw new PlanningErrorException("Mismatched plan output cols " +
-                                                 "to parsed display columns");
-            }
-        }
-    }
-
 }
