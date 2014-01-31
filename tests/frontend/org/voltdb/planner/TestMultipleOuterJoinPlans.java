@@ -281,7 +281,7 @@ public class TestMultipleOuterJoinPlans  extends PlannerTestCase {
       c = n.getChild(1);
       assertTrue(c instanceof ReceivePlanNode);
       n = lpn.get(1).getChild(0);
-      assertTrue(n instanceof IndexScanPlanNode);
+      assertTrue(n instanceof SeqScanPlanNode);
 
       // R3.A and P2.A have an index. P2,R1 is NLJ/IndexScan because P2 is distributed and it's an outer join
       lpn = compileToFragments("select *  FROM R1 LEFT JOIN P2 ON R1.A = P2.A, R3 WHERE R1.A=R3.A ");
@@ -296,7 +296,7 @@ public class TestMultipleOuterJoinPlans  extends PlannerTestCase {
       c = n.getChild(1);
       assertTrue(c instanceof ReceivePlanNode);
       n = lpn.get(1).getChild(0);
-      assertTrue(n instanceof IndexScanPlanNode);
+      assertTrue(n instanceof SeqScanPlanNode);
 
       // Two distributed table
       lpn = compileToFragments("select *  FROM R3,P1 LEFT JOIN P2 ON R3.A = P2.A WHERE R3.A=P1.A ");
