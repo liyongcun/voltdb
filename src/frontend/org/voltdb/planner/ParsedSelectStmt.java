@@ -1256,7 +1256,7 @@ public class ParsedSelectStmt extends AbstractParsedStmt {
     }
 
     boolean groupByIsAnOrderByPermutation() {
-		if (groupAndOrderByPermutationWasTested) {
+        if (groupAndOrderByPermutationWasTested) {
             return groupAndOrderByPermutationResult;
         }
         groupAndOrderByPermutationWasTested = true;

@@ -171,16 +171,20 @@ public class TestPlansGroupBy extends PlannerTestCase {
         pns = compileToFragments("SELECT F_D2 - F_D3, ABS(F_D1), COUNT(*) FROM F GROUP BY F_D2 - F_D3, ABS(F_D1)");
         checkGroupByOnlyPlan(pns, true, true, true);
 
-        // unoptimized case (only use second col of the index), but will be replaced in
-        // SeqScanToIndexScan optimization for deterministic reason
-        // use EXPR_F_TREE1 not EXPR_F_TREE2
+        // unoptimized case (only use second col of the index), and will NOT be replaced in
+        // SeqScanToIndexScan optimization because the determinism fix does not apply to multi-fragment plans.
         pns = compileToFragments("SELECT F_D2 - F_D3, COUNT(*) FROM F GROUP BY F_D2 - F_D3");
         /*/ debug */ System.out.println(pns.get(0).toExplainPlanString());
-        checkGroupByOnlyPlan(pns, true, true, true);
-    }
+        checkGroupByOnlyPlan(pns, true, true, false);
+
+        // unoptimized case (only use second col of the index), but scan will be replaced in the
+        // SeqScanToIndexScan determinism fix.
+        pns = compileToFragments("SELECT F_D2 - F_D3, COUNT(*) FROM RF GROUP BY F_D2 - F_D3");
+        /*/ debug */ System.out.println(pns.get(0).toExplainPlanString());
+        checkGroupByOnlyPlan(pns, false, true, true);
+}
 
     public void testEdgeComplexRelatedCases() {
-        // Make sure that this query will compile correctly
         pns = compileToFragments("select PKEY+A1 from T1 Order by PKEY+A1");
         AbstractPlanNode p = pns.get(0).getChild(0);
         assertTrue(p instanceof ProjectionPlanNode);
@@ -201,7 +205,6 @@ public class TestPlansGroupBy extends PlannerTestCase {
         p = pns.get(1).getChild(0);
         assertTrue(p instanceof AbstractScanPlanNode);
 
-        // Make sure it compile correctly
         pns = compileToFragments("SELECT A1, count(*) as tag FROM P1 group by A1 order by tag, A1 limit 1");
         p = pns.get(0).getChild(0);
 
@@ -214,6 +217,21 @@ public class TestPlansGroupBy extends PlannerTestCase {
         p = pns.get(1).getChild(0);
         assertTrue(p instanceof AggregatePlanNode);
         assertTrue(p.getChild(0) instanceof AbstractScanPlanNode);
+
+        pns = compileToFragments("SELECT F_D1, count(*) as tag FROM RF group by F_D1 order by tag");
+        p = pns.get(0).getChild(0);
+        /*/ to debug */ System.out.println("DEBUG: " + p.toExplainPlanString());
+        assertTrue(p instanceof ProjectionPlanNode);
+        assertTrue(p.getChild(0) instanceof OrderByPlanNode);
+        assertTrue(p.getChild(0).getChild(0) instanceof AggregatePlanNode);
+
+        pns = compileToFragments("SELECT F_D1, count(*) FROM RF group by F_D1 order by 2");
+        p = pns.get(0).getChild(0);
+        /*/ to debug */ System.out.println("DEBUG: " + p.toExplainPlanString());
+        assertTrue(p instanceof ProjectionPlanNode);
+        //assertTrue(p.getChild(0) instanceof LimitPlanNode);
+        assertTrue(p.getChild(0) instanceof OrderByPlanNode);
+        assertTrue(p.getChild(0).getChild(0) instanceof AggregatePlanNode);
     }
 
     private void checkHasComplexAgg(List<AbstractPlanNode> pns) {
