@@ -166,8 +166,7 @@ class MpRoSitePool {
         Iterator<MpRoSiteContext> siterator = m_idleSites.iterator();
         while (siterator.hasNext()) {
             MpRoSiteContext site = siterator.next();
-            if (site.getCatalogCRC() != m_catalogContext.getCatalogCRC()
-                    || site.getCatalogVersion() != m_catalogContext.catalogVersion) {
+            if (site.getCatalogVersion() != m_catalogContext.catalogVersion) {
                 site.shutdown();
                 m_idleSites.remove(site);
             }
@@ -244,8 +243,7 @@ class MpRoSitePool {
         // check the catalog versions, only push back onto idle if the catalog hasn't changed
         // otherwise, just let it get garbage collected and let doWork() construct new ones for the
         // pool with the updated catalog.
-        if (site.getCatalogCRC() == m_catalogContext.getCatalogCRC()
-                && site.getCatalogVersion() == m_catalogContext.catalogVersion) {
+        if (site.getCatalogVersion() == m_catalogContext.catalogVersion) {
             m_idleSites.push(site);
         }
         else {
